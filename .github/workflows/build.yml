@@ -119,9 +119,7 @@ jobs:
 
           apply(f"{base}/commands/Navigate.kt",
               (r"import androidx\.core\.app\.NotificationCompat\n", ""),
-              (r"NotificationCompat\.Builder", "Notification.Builder"),
-              (r"NotificationCompat\.PRIORITY_HIGH", "Notification.PRIORITY_HIGH"),
-              (r"\n\s*\.setStyle\(Notification\.BigTextStyle\(\)\.bigText\(body\)\)", ""),
+              (r"NotificationCompat\.", "Notification."),
               (r"import android\.os\.Build", "import android.app.Notification\nimport android.os.Build"),
           )
 
