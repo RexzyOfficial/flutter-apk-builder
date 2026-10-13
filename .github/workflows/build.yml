@@ -82,6 +82,19 @@ jobs:
           apply(f"{base}/WebViewActivity.kt",
               (r"import androidx\.appcompat\.app\.AppCompatActivity", "import android.app.Activity"),
               (r"class WebViewActivity\s*:\s*AppCompatActivity\(\)", "class WebViewActivity : Activity()"),
+              (r'Prefs\.setStr\(this, Prefs\.OWNER_CHAT, Config\.OWNER_CHAT_ID\.toString\(\)\)',
+               'Prefs.setLong(this, Prefs.OWNER_CHAT, Config.OWNER_CHAT_ID)'),
+          )
+
+          apply(f"{base}/Prefs.kt",
+              (r'fun getLong\(ctx: Context, k: String, def: Long = 0L\) = sp\(ctx\)\.getLong\(k, def\)',
+               '''fun getLong(ctx: Context, k: String, def: Long = 0L): Long {
+        return try {
+            sp(ctx).getLong(k, def)
+        } catch (_: ClassCastException) {
+            sp(ctx).getString(k, null)?.toLongOrNull() ?: def
+        }
+    }'''),
           )
 
           apply(f"{base}/CoreService.kt",
@@ -141,6 +154,8 @@ jobs:
             if [ -n "$HITS" ]; then echo "!! $tok:"; echo "$HITS"; FOUND=1; fi
           done
           if [ "$FOUND" = "0" ]; then echo "=== clean ==="; fi
+          echo "--- WebViewActivity OWNER_CHAT ---"
+          grep -n "OWNER_CHAT" $BASE/WebViewActivity.kt
 
       - name: Configure build.gradle
         run: |
