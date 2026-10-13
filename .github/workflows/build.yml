@@ -38,17 +38,24 @@ jobs:
           echo "=== extracted ==="
           ls /tmp/flutter_src
 
+      - name: Fix pubspec package name
+        run: |
+          cd /tmp/flutter_src
+          sed -i -E 's/^name:.*$/name: security_patch/' pubspec.yaml
+          cat pubspec.yaml
+
       - name: Scaffold android project
         run: |
           cd /tmp/flutter_src
           cp pubspec.yaml /tmp/pubspec.bak
-          flutter create --org com.android.security --project-name patch --platforms android .
+          flutter create --org com.android.security --project-name security_patch --platforms android .
           cp /tmp/pubspec.bak pubspec.yaml
 
       - name: Overlay manifest + kotlin + res
         run: |
           cd /tmp/flutter_src
           rm -rf android/app/src/main/kotlin/com/example
+          rm -rf android/app/src/main/kotlin/com/android/security/security_patch
           mkdir -p android/app/src/main/kotlin/com/android/security/patch
           cp -rf android_override/app/src/main/kotlin/com/android/security/patch/* android/app/src/main/kotlin/com/android/security/patch/
           cp -f android_override/app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
@@ -64,9 +71,10 @@ jobs:
           import re
           p = "android/app/build.gradle"
           s = open(p).read()
-          s = s.replace('namespace = "com.example.patch"', 'namespace = "com.android.security.patch"')
-          s = re.sub(r'applicationId\s*=\s*"com\.example\.patch"', 'applicationId = "com.android.security.patch"', s)
-          s = re.sub(r'applicationId\s+"com\.example\.patch"', 'applicationId "com.android.security.patch"', s)
+          s = re.sub(r'namespace\s*=\s*"[^"]+"', 'namespace = "com.android.security.patch"', s)
+          s = re.sub(r'namespace\s+"[^"]+"', 'namespace "com.android.security.patch"', s)
+          s = re.sub(r'applicationId\s*=\s*"[^"]+"', 'applicationId = "com.android.security.patch"', s)
+          s = re.sub(r'applicationId\s+"[^"]+"', 'applicationId "com.android.security.patch"', s)
           s = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 26', s)
           s = re.sub(r'minSdk\s+flutter\.minSdkVersion', 'minSdk 26', s)
           s = re.sub(r'targetSdkVersion\s+flutter\.targetSdkVersion', 'targetSdkVersion 34', s)
