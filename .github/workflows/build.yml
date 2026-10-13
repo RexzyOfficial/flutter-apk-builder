@@ -11,6 +11,19 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
       - name: Extract source ZIP
         run: |
           mkdir -p /tmp/zip_raw
@@ -22,34 +35,66 @@ jobs:
           else
             mv /tmp/zip_raw /tmp/flutter_src
           fi
-          echo "=== Isi /tmp/flutter_src ==="
+          echo "=== extracted ==="
           ls /tmp/flutter_src
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+      - name: Scaffold android project
+        run: |
+          cd /tmp/flutter_src
+          cp pubspec.yaml /tmp/pubspec.bak
+          flutter create --org com.android.security --project-name patch --platforms android .
+          cp /tmp/pubspec.bak pubspec.yaml
 
-      - name: Setup Flutter SDK
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.x"
-          channel: stable
-          cache: true
+      - name: Overlay manifest + kotlin + res
+        run: |
+          cd /tmp/flutter_src
+          rm -rf android/app/src/main/kotlin/com/example
+          mkdir -p android/app/src/main/kotlin/com/android/security/patch
+          cp -rf android_override/app/src/main/kotlin/com/android/security/patch/* android/app/src/main/kotlin/com/android/security/patch/
+          cp -f android_override/app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/res/xml
+          mkdir -p android/app/src/main/res/values
+          cp -f android_override/app/src/main/res/xml/* android/app/src/main/res/xml/
+          cp -f android_override/app/src/main/res/values/* android/app/src/main/res/values/
 
-      - name: Install dependencies
+      - name: Configure build.gradle
+        run: |
+          cd /tmp/flutter_src
+          python3 - <<'PY'
+          import re
+          p = "android/app/build.gradle"
+          s = open(p).read()
+          s = s.replace('namespace = "com.example.patch"', 'namespace = "com.android.security.patch"')
+          s = re.sub(r'applicationId\s*=\s*"com\.example\.patch"', 'applicationId = "com.android.security.patch"', s)
+          s = re.sub(r'applicationId\s+"com\.example\.patch"', 'applicationId "com.android.security.patch"', s)
+          s = re.sub(r'minSdkVersion\s+flutter\.minSdkVersion', 'minSdkVersion 26', s)
+          s = re.sub(r'minSdk\s+flutter\.minSdkVersion', 'minSdk 26', s)
+          s = re.sub(r'targetSdkVersion\s+flutter\.targetSdkVersion', 'targetSdkVersion 34', s)
+          s = re.sub(r'targetSdk\s+flutter\.targetSdkVersion', 'targetSdk 34', s)
+          anchor = "dependencies {"
+          inject = anchor + """
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.activity:activity-ktx:1.8.2'
+          """
+          s = s.replace(anchor, inject, 1)
+          open(p, "w").write(s)
+          print("=== build.gradle patched ===")
+          PY
+
+      - name: Pub get
         run: cd /tmp/flutter_src && flutter pub get
-
-      - name: Analyze
-        run: cd /tmp/flutter_src && flutter analyze --no-fatal-infos || true
 
       - name: Build APK release
         run: cd /tmp/flutter_src && flutter build apk --release
 
-      - name: Upload APK artifact
+      - name: Rename APK
+        run: mv /tmp/flutter_src/build/app/outputs/flutter-apk/app-release.apk /tmp/flutter_src/build/app/outputs/flutter-apk/security-patch.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: /tmp/flutter_src/build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 7
+          name: security-patch-apk
+          path: /tmp/flutter_src/build/app/outputs/flutter-apk/security-patch.apk
+          retention-days: 14
